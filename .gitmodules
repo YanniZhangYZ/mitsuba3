@@ -44,4 +44,5 @@
 	shallow = true
 [submodule "ext/drjit"]
 	path = ext/drjit
-	url = https://github.com/mitsuba-renderer/drjit
+	url = https://github.com/YanniZhangYZ/drjit.git
+    branch = yanni_ad
