@@ -317,3 +317,213 @@ class Adam(Optimizer):
                 '  eps = %g\n'
                 ']' % (list(self.keys()), dict(self.lr, default=self.lr_default),
                        self.beta_1, self.beta_2, self.epsilon))
+
+
+class AdamVar(Optimizer):
+    def __init__(self, lr, beta_1=0.9, beta_2=0.999, epsilon=1e-8,
+                 mask_updates=False, uniform=False, params: dict=None):
+        """
+        Parameter ``lr``:
+            learning rate
+
+        Parameter ``beta_1``:
+            controls the exponential averaging of first order gradient moments
+
+        Parameter ``beta_2``:
+            controls the exponential averaging of second order gradient moments
+
+        Parameter ``mask_updates``:
+            if enabled, parameters and state variables will only be updated in a
+            given iteration if it received nonzero gradients in that iteration
+
+        Parameter ``uniform``:
+            if enabled, the optimizer will use the 'UniformAdam' variant of Adam
+            [Nicolet et al. 2021], where the update rule uses the *maximum* of
+            the second moment estimates at the current step instead of the
+            per-element second moments.
+
+        Parameter ``params`` (:py:class:`dict`):
+            Optional dictionary-like object containing parameters to optimize.
+        """
+        assert 0 <= beta_1 < 1 and 0 <= beta_2 < 1 \
+            and lr > 0 and epsilon > 0
+
+        self.beta_1 = beta_1
+        self.beta_2 = beta_2
+        self.epsilon = epsilon
+        self.mask_updates = mask_updates
+        self.uniform = uniform
+        self.t = defaultdict(lambda: 0)
+        super().__init__(lr, params)
+
+    def step(self):
+        """Take a gradient step"""
+        for k, p in self.variables.items():
+            self.t[k] += 1
+            lr_scale = dr.sqrt(1 - self.beta_2 ** self.t[k]) / (1 - self.beta_1 ** self.t[k])
+            lr_scale = dr.opaque(dr.detached_t(mi.Float), lr_scale, shape=1)
+
+            lr_t = self.lr_v[k] * lr_scale
+            g_p = dr.grad(p)
+            g2_p = dr.grad2(p)
+            shape = dr.shape(g_p)
+
+            if shape == 0:
+                continue
+            elif shape != dr.shape(self.state[k][0]):
+                # Reset state if data size has changed
+                self.reset(k)
+
+            m_tp, v_tp = self.state[k]
+            m_t = self.beta_1 * m_tp + (1 - self.beta_1) * g_p
+            # v_t = self.beta_2 * v_tp + (1 - self.beta_2) * dr.sqr(g_p)
+            v_t = self.beta_2 * v_tp + (1 - self.beta_2) * g2_p
+
+            if self.mask_updates:
+                nonzero = dr.neq(g_p, 0.)
+                m_t = dr.select(nonzero, m_t, m_tp)
+                v_t = dr.select(nonzero, v_t, v_tp)
+            self.state[k] = (m_t, v_t)
+            dr.schedule(self.state[k])
+
+            if self.uniform:
+                step = lr_t * m_t / (dr.sqrt(dr.max(v_t)) + self.epsilon)
+            else:
+                step = lr_t * m_t / (dr.sqrt(v_t) + self.epsilon)
+            if self.mask_updates:
+                step = dr.select(nonzero, step, 0.)
+            u = dr.detach(p) - step
+            u = type(p)(u)
+            dr.enable_grad(u)
+            self.variables[k] = u
+            dr.schedule(self.variables[k])
+
+        dr.eval()
+
+    def reset(self, key):
+        """Zero-initializes the internal state associated with a parameter"""
+        p = self.variables[key]
+        shape = dr.shape(p) if p.IsTensor else dr.width(p)
+        self.state[key] = (dr.zeros(dr.detached_t(p), shape),
+                           dr.zeros(dr.detached_t(p), shape))
+        self.t[key] = 0
+
+    def __repr__(self):
+        return ('Adam[\n'
+                '  variables = %s,\n'
+                '  lr = %s,\n'
+                '  betas = (%g, %g),\n'
+                '  eps = %g\n'
+                ']' % (list(self.keys()), dict(self.lr, default=self.lr_default),
+                       self.beta_1, self.beta_2, self.epsilon))
+
+
+class AdamVarC(Optimizer):
+    def __init__(self, lr, beta_1=0.9, beta_2=0.999, epsilon=1e-8,
+                 mask_updates=False, uniform=False, params: dict=None):
+        """
+        Parameter ``lr``:
+            learning rate
+
+        Parameter ``beta_1``:
+            controls the exponential averaging of first order gradient moments
+
+        Parameter ``beta_2``:
+            controls the exponential averaging of second order gradient moments
+
+        Parameter ``mask_updates``:
+            if enabled, parameters and state variables will only be updated in a
+            given iteration if it received nonzero gradients in that iteration
+
+        Parameter ``uniform``:
+            if enabled, the optimizer will use the 'UniformAdam' variant of Adam
+            [Nicolet et al. 2021], where the update rule uses the *maximum* of
+            the second moment estimates at the current step instead of the
+            per-element second moments.
+
+        Parameter ``params`` (:py:class:`dict`):
+            Optional dictionary-like object containing parameters to optimize.
+        """
+        assert 0 <= beta_1 < 1 and 0 <= beta_2 < 1 \
+            and lr > 0 and epsilon > 0
+
+        self.beta_1 = beta_1
+        self.beta_2 = beta_2
+        self.epsilon = epsilon
+        self.mask_updates = mask_updates
+        self.uniform = uniform
+        self.t = defaultdict(lambda: 0)
+        super().__init__(lr, params)
+
+    def step(self):
+        """Take a gradient step"""
+        for k, p in self.variables.items():
+            self.t[k] += 1
+            # lr_scale = dr.sqrt(1 - self.beta_2 ** self.t[k]) / (1 - self.beta_1 ** self.t[k])
+            # lr_scale = dr.opaque(dr.detached_t(mi.Float), lr_scale, shape=1)
+
+            # lr_t = self.lr_v[k] * lr_scale
+            lr_t = self.lr_v[k]
+            g_p = dr.grad(p)
+            g2_p = dr.grad2(p)
+            counter_p = dr.counter(p)
+            shape = dr.shape(g_p)
+            # print(shape)
+
+            if shape == 0:
+                continue
+            elif shape != dr.shape(self.state[k][0]):
+                # Reset state if data size has changed
+                self.reset(k)
+
+            m_tp, v_tp, N_tp1, N_tp2 = self.state[k]
+            N_tp1*=self.beta_1
+            N_tp2*=self.beta_2
+            w_p1 =  counter_p / (counter_p + N_tp1)
+            w_p2 =  counter_p / (counter_p + N_tp2)
+
+
+
+            m_t = (1-w_p1) * m_tp + w_p1 * g_p
+            # v_t = self.beta_2 * v_tp + (1 - self.beta_2) * dr.sqr(g_p)
+            v_t = (1-w_p2) * v_tp + w_p2 * g2_p
+
+            if self.mask_updates:
+                nonzero = dr.neq(g_p, 0.)
+                m_t = dr.select(nonzero, m_t, m_tp)
+                v_t = dr.select(nonzero, v_t, v_tp)
+            self.state[k] = (m_t, v_t, N_tp1 + counter_p, N_tp2 + counter_p)
+            dr.schedule(self.state[k])
+
+            if self.uniform:
+                step = lr_t * m_t / (dr.sqrt(dr.max(v_t)) + self.epsilon)
+            else:
+                step = lr_t * m_t / (dr.sqrt(v_t) + self.epsilon)
+            if self.mask_updates:
+                step = dr.select(nonzero, step, 0.)
+            u = dr.detach(p) - step
+            u = type(p)(u)
+            dr.enable_grad(u)
+            self.variables[k] = u
+            dr.schedule(self.variables[k])
+
+        dr.eval()
+
+    def reset(self, key):
+        """Zero-initializes the internal state associated with a parameter"""
+        p = self.variables[key]
+        shape = dr.shape(p) if p.IsTensor else dr.width(p)
+        self.state[key] = (dr.zeros(dr.detached_t(p), shape),
+                           dr.zeros(dr.detached_t(p), shape),
+                           dr.zeros(dr.detached_t(p), shape),
+                           dr.zeros(dr.detached_t(p), shape))
+        self.t[key] = 0
+
+    def __repr__(self):
+        return ('Adam[\n'
+                '  variables = %s,\n'
+                '  lr = %s,\n'
+                '  betas = (%g, %g),\n'
+                '  eps = %g\n'
+                ']' % (list(self.keys()), dict(self.lr, default=self.lr_default),
+                       self.beta_1, self.beta_2, self.epsilon))
