@@ -319,7 +319,133 @@ class Adam(Optimizer):
                        self.beta_1, self.beta_2, self.epsilon))
 
 
-class AdamVar(Optimizer):
+class AdamPrint(Optimizer):
+    """
+    Implements the Adam optimizer presented in the paper *Adam: A Method for
+    Stochastic Optimization* by Kingman and Ba, ICLR 2015.
+
+    When optimizing many variables (e.g. a high resolution texture) with
+    momentum enabled, it may be beneficial to restrict state and variable
+    updates to the entries that received nonzero gradients in the current
+    iteration (``mask_updates=True``).
+    In the context of differentiable Monte Carlo simulations, many of those
+    variables may not be observed at each iteration, e.g. when a surface is
+    not visible from the current camera. Gradients for unobserved variables
+    will remain at zero by default.
+    If we do not take special care, at each new iteration:
+
+    1. Momentum accumulated at previous iterations (potentially very noisy)
+       will keep being applied to the variable.
+    2. The optimizer's state will be updated to incorporate ``gradient = 0``,
+       even though it is not an actual gradient value but rather lack of one.
+
+    Enabling ``mask_updates`` avoids these two issues. This is similar to
+    `PyTorch's SparseAdam optimizer <https://pytorch.org/docs/1.9.0/generated/torch.optim.SparseAdam.html>`_.
+    """
+    def __init__(self, lr, beta_1=0.9, beta_2=0.999, epsilon=1e-8,
+                 mask_updates=False, uniform=False, params: dict=None):
+        """
+        Parameter ``lr``:
+            learning rate
+
+        Parameter ``beta_1``:
+            controls the exponential averaging of first order gradient moments
+
+        Parameter ``beta_2``:
+            controls the exponential averaging of second order gradient moments
+
+        Parameter ``mask_updates``:
+            if enabled, parameters and state variables will only be updated in a
+            given iteration if it received nonzero gradients in that iteration
+
+        Parameter ``uniform``:
+            if enabled, the optimizer will use the 'UniformAdam' variant of Adam
+            [Nicolet et al. 2021], where the update rule uses the *maximum* of
+            the second moment estimates at the current step instead of the
+            per-element second moments.
+
+        Parameter ``params`` (:py:class:`dict`):
+            Optional dictionary-like object containing parameters to optimize.
+        """
+        assert 0 <= beta_1 < 1 and 0 <= beta_2 < 1 \
+            and lr > 0 and epsilon > 0
+
+        self.beta_1 = beta_1
+        self.beta_2 = beta_2
+        self.epsilon = epsilon
+        self.mask_updates = mask_updates
+        self.uniform = uniform
+        self.t = defaultdict(lambda: 0)
+        super().__init__(lr, params)
+
+    def step(self):
+        """Take a gradient step"""
+        wp1s = []
+        wp2s = []
+        for k, p in self.variables.items():
+            self.t[k] += 1
+            lr_scale = dr.sqrt(1 - self.beta_2 ** self.t[k]) / (1 - self.beta_1 ** self.t[k])
+            lr_scale = dr.opaque(dr.detached_t(mi.Float), lr_scale, shape=1)
+
+            lr_t = self.lr_v[k] * lr_scale
+            g_p = dr.grad(p)
+            shape = dr.shape(g_p)
+
+            if shape == 0:
+                continue
+            elif shape != dr.shape(self.state[k][0]):
+                # Reset state if data size has changed
+                self.reset(k)
+
+            m_tp, v_tp = self.state[k]
+            m_t = self.beta_1 * m_tp + (1 - self.beta_1) * g_p
+            v_t = self.beta_2 * v_tp + (1 - self.beta_2) * dr.sqr(g_p)
+
+            wp1s.append((1 - self.beta_1)/ (1 - self.beta_1 ** self.t[k]))
+            wp2s.append((1 - self.beta_2)/ (1 - self.beta_2 ** self.t[k]))
+
+            if self.mask_updates:
+                nonzero = dr.neq(g_p, 0.)
+                m_t = dr.select(nonzero, m_t, m_tp)
+                v_t = dr.select(nonzero, v_t, v_tp)
+            self.state[k] = (m_t, v_t)
+            dr.schedule(self.state[k])
+
+            if self.uniform:
+                step = lr_t * m_t / (dr.sqrt(dr.max(v_t)) + self.epsilon)
+            else:
+                step = lr_t * m_t / (dr.sqrt(v_t) + self.epsilon)
+            if self.mask_updates:
+                step = dr.select(nonzero, step, 0.)
+            u = dr.detach(p) - step
+            u = type(p)(u)
+            dr.enable_grad(u)
+            self.variables[k] = u
+            dr.schedule(self.variables[k])
+
+        dr.eval()
+        return wp1s, wp2s
+
+    def reset(self, key):
+        """Zero-initializes the internal state associated with a parameter"""
+        p = self.variables[key]
+        shape = dr.shape(p) if p.IsTensor else dr.width(p)
+        self.state[key] = (dr.zeros(dr.detached_t(p), shape),
+                           dr.zeros(dr.detached_t(p), shape))
+        self.t[key] = 0
+
+    def __repr__(self):
+        return ('Adam[\n'
+                '  variables = %s,\n'
+                '  lr = %s,\n'
+                '  betas = (%g, %g),\n'
+                '  eps = %g\n'
+                ']' % (list(self.keys()), dict(self.lr, default=self.lr_default),
+                       self.beta_1, self.beta_2, self.epsilon))
+
+
+
+class AdamV(Optimizer):
     def __init__(self, lr, beta_1=0.9, beta_2=0.999, epsilon=1e-8,
                  mask_updates=False, uniform=False, params: dict=None):
         """
@@ -418,7 +544,7 @@ class AdamVar(Optimizer):
                        self.beta_1, self.beta_2, self.epsilon))
 
 
-class AdamVarC(Optimizer):
+class AdamVC(Optimizer):
     def __init__(self, lr, beta_1=0.9, beta_2=0.999, epsilon=1e-8,
                  mask_updates=False, uniform=False, params: dict=None):
         """
@@ -459,11 +585,11 @@ class AdamVarC(Optimizer):
         """Take a gradient step"""
         for k, p in self.variables.items():
             self.t[k] += 1
-            # lr_scale = dr.sqrt(1 - self.beta_2 ** self.t[k]) / (1 - self.beta_1 ** self.t[k])
-            # lr_scale = dr.opaque(dr.detached_t(mi.Float), lr_scale, shape=1)
+            lr_scale = dr.sqrt(1 - self.beta_2 ** self.t[k]) / (1 - self.beta_1 ** self.t[k])
+            lr_scale = dr.opaque(dr.detached_t(mi.Float), lr_scale, shape=1)
 
-            # lr_t = self.lr_v[k] * lr_scale
-            lr_t = self.lr_v[k]
+            lr_t = self.lr_v[k] * lr_scale
+            # lr_t = self.lr_v[k]
             g_p = dr.grad(p)
             g2_p = dr.grad2(p)
             counter_p = dr.counter(p)
@@ -477,8 +603,8 @@ class AdamVarC(Optimizer):
                 self.reset(k)
 
             m_tp, v_tp, N_tp1, N_tp2 = self.state[k]
-            N_tp1*=self.beta_1
-            N_tp2*=self.beta_2
+            N_tp1 *= self.beta_1
+            N_tp2 *= self.beta_2
             w_p1 =  counter_p / (counter_p + N_tp1)
             w_p2 =  counter_p / (counter_p + N_tp2)
 
@@ -487,6 +613,7 @@ class AdamVarC(Optimizer):
             m_t = (1-w_p1) * m_tp + w_p1 * g_p
             # v_t = self.beta_2 * v_tp + (1 - self.beta_2) * dr.sqr(g_p)
             v_t = (1-w_p2) * v_tp + w_p2 * g2_p
+            
 
             if self.mask_updates:
                 nonzero = dr.neq(g_p, 0.)
@@ -527,3 +654,123 @@ class AdamVarC(Optimizer):
                 '  eps = %g\n'
                 ']' % (list(self.keys()), dict(self.lr, default=self.lr_default),
                        self.beta_1, self.beta_2, self.epsilon))
+
+
+class AdamVCPrint(Optimizer):
+    def __init__(self, lr, beta_1=0.9, beta_2=0.999, epsilon=1e-8,
+                 mask_updates=False, uniform=False, params: dict=None):
+        """
+        Parameter ``lr``:
+            learning rate
+
+        Parameter ``beta_1``:
+            controls the exponential averaging of first order gradient moments
+
+        Parameter ``beta_2``:
+            controls the exponential averaging of second order gradient moments
+
+        Parameter ``mask_updates``:
+            if enabled, parameters and state variables will only be updated in a
+            given iteration if it received nonzero gradients in that iteration
+
+        Parameter ``uniform``:
+            if enabled, the optimizer will use the 'UniformAdam' variant of Adam
+            [Nicolet et al. 2021], where the update rule uses the *maximum* of
+            the second moment estimates at the current step instead of the
+            per-element second moments.
+
+        Parameter ``params`` (:py:class:`dict`):
+            Optional dictionary-like object containing parameters to optimize.
+        """
+        assert 0 <= beta_1 < 1 and 0 <= beta_2 < 1 \
+            and lr > 0 and epsilon > 0
+
+        self.beta_1 = beta_1
+        self.beta_2 = beta_2
+        self.epsilon = epsilon
+        self.mask_updates = mask_updates
+        self.uniform = uniform
+        self.t = defaultdict(lambda: 0)
+        super().__init__(lr, params)
+
+    def step(self):
+        """Take a gradient step"""
+        w_p1s = []
+        w_p2s = []
+        for k, p in self.variables.items():
+            self.t[k] += 1
+            lr_scale = dr.sqrt(1 - self.beta_2 ** self.t[k]) / (1 - self.beta_1 ** self.t[k])
+            lr_scale = dr.opaque(dr.detached_t(mi.Float), lr_scale, shape=1)
+
+            lr_t = self.lr_v[k] * lr_scale
+            # lr_t = self.lr_v[k]
+            g_p = dr.grad(p)
+            g2_p = dr.grad2(p)
+            counter_p = dr.counter(p)
+            shape = dr.shape(g_p)
+            # print(shape)
+
+            if shape == 0:
+                continue
+            elif shape != dr.shape(self.state[k][0]):
+                # Reset state if data size has changed
+                self.reset(k)
+
+            m_tp, v_tp, N_tp1, N_tp2 = self.state[k]
+            N_tp1 *= self.beta_1
+            N_tp2 *= self.beta_2
+            w_p1 =  counter_p / (counter_p + N_tp1)
+            w_p2 =  counter_p / (counter_p + N_tp2)
+
+
+
+            m_t = (1-w_p1) * m_tp + w_p1 * g_p
+            # v_t = self.beta_2 * v_tp + (1 - self.beta_2) * dr.sqr(g_p)
+            v_t = (1-w_p2) * v_tp + w_p2 * g2_p
+
+            w_p1s.append(w_p1 /(1 - self.beta_1 ** self.t[k]))
+            w_p2s.append(w_p2 / (1 - self.beta_2 ** self.t[k]))
+
+            
+
+            if self.mask_updates:
+                nonzero = dr.neq(g_p, 0.)
+                m_t = dr.select(nonzero, m_t, m_tp)
+                v_t = dr.select(nonzero, v_t, v_tp)
+            self.state[k] = (m_t, v_t, N_tp1 + counter_p, N_tp2 + counter_p)
+            dr.schedule(self.state[k])
+
+            if self.uniform:
+                step = lr_t * m_t / (dr.sqrt(dr.max(v_t)) + self.epsilon)
+            else:
+                step = lr_t * m_t / (dr.sqrt(v_t) + self.epsilon)
+            if self.mask_updates:
+                step = dr.select(nonzero, step, 0.)
+            u = dr.detach(p) - step
+            u = type(p)(u)
+            dr.enable_grad(u)
+            self.variables[k] = u
+            dr.schedule(self.variables[k])
+
+        dr.eval()
+        return w_p1s, w_p2s 
+
+    def reset(self, key):
+        """Zero-initializes the internal state associated with a parameter"""
+        p = self.variables[key]
+        shape = dr.shape(p) if p.IsTensor else dr.width(p)
+        self.state[key] = (dr.zeros(dr.detached_t(p), shape),
+                           dr.zeros(dr.detached_t(p), shape),
+                           dr.zeros(dr.detached_t(p), shape),
+                           dr.zeros(dr.detached_t(p), shape))
+        self.t[key] = 0
+
+    def __repr__(self):
+        return ('Adam[\n'
+                '  variables = %s,\n'
+                '  lr = %s,\n'
+                '  betas = (%g, %g),\n'
+                '  eps = %g\n'
+                ']' % (list(self.keys()), dict(self.lr, default=self.lr_default),
+                       self.beta_1, self.beta_2, self.epsilon))
+
