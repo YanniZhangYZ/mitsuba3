@@ -40,8 +40,8 @@
 	url = https://github.com/fastfloat/fast_float
 [submodule "tutorials"]
 	path = tutorials
-	url = https://github.com/mitsuba-renderer/mitsuba-tutorials
-	shallow = true
+	url = https://github.com/YanniZhangYZ/mitsuba-tutorials.git
+    branch = yanni_ad
 [submodule "ext/drjit"]
 	path = ext/drjit
 	url = https://github.com/YanniZhangYZ/drjit.git
