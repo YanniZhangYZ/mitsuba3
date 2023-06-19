@@ -603,10 +603,16 @@ class AdamVC(Optimizer):
                 self.reset(k)
 
             m_tp, v_tp, N_tp1, N_tp2 = self.state[k]
+            counter_nonzero = dr.neq(counter_p, 0.)
+
             N_tp1 *= self.beta_1
             N_tp2 *= self.beta_2
-            w_p1 =  counter_p / (counter_p + N_tp1)
-            w_p2 =  counter_p / (counter_p + N_tp2)
+            w_p1 = dr.select(counter_nonzero, 
+                             counter_p / (counter_p + N_tp1), 
+                             0.)
+            w_p2 = dr.select(counter_nonzero, 
+                             counter_p / (counter_p + N_tp2), 
+                             0.)
 
 
 
